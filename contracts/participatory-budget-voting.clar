@@ -10,11 +10,15 @@
 (define-constant ERR_DELEGATION_CYCLE (err u108))
 (define-constant ERR_SELF_DELEGATION (err u109))
 (define-constant ERR_DELEGATE_NOT_REGISTERED (err u110))
+(define-constant ERR_CATEGORY_NOT_FOUND (err u111))
+(define-constant ERR_CATEGORY_BUDGET_EXCEEDED (err u112))
+(define-constant ERR_CATEGORY_EXISTS (err u113))
 
 (define-data-var total-budget uint u0)
 (define-data-var allocated-budget uint u0)
 (define-data-var voting-period uint u1008)
 (define-data-var proposal-counter uint u0)
+(define-data-var category-counter uint u0)
 
 (define-map proposals
   { proposal-id: uint }
@@ -26,7 +30,8 @@
     votes-for: uint,
     votes-against: uint,
     created-at: uint,
-    status: (string-ascii 16)
+    status: (string-ascii 16),
+    category-id: uint
   }
 )
 
@@ -43,6 +48,23 @@
 (define-map delegation
   { delegator: principal }
   { delegate: principal, delegated-at: uint }
+)
+
+(define-map categories
+  { category-id: uint }
+  {
+    name: (string-ascii 32),
+    description: (string-ascii 128),
+    budget-limit: uint,
+    allocated: uint,
+    created-at: uint,
+    is-active: bool
+  }
+)
+
+(define-map category-name-lookup
+  { name: (string-ascii 32) }
+  { category-id: uint }
 )
 
 (define-public (set-total-budget (amount uint))
@@ -64,16 +86,85 @@
   )
 )
 
-(define-public (submit-proposal (title (string-ascii 64)) (description (string-ascii 256)) (amount uint))
+(define-public (create-category (name (string-ascii 32)) (description (string-ascii 128)) (budget-limit uint))
+  (let
+    (
+      (category-id (+ (var-get category-counter) u1))
+      (existing-category (map-get? category-name-lookup { name: name }))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (> budget-limit u0) ERR_INVALID_AMOUNT)
+    (asserts! (is-none existing-category) ERR_CATEGORY_EXISTS)
+    
+    (map-set categories
+      { category-id: category-id }
+      {
+        name: name,
+        description: description,
+        budget-limit: budget-limit,
+        allocated: u0,
+        created-at: stacks-block-height,
+        is-active: true
+      }
+    )
+    
+    (map-set category-name-lookup
+      { name: name }
+      { category-id: category-id }
+    )
+    
+    (var-set category-counter category-id)
+    (ok category-id)
+  )
+)
+
+(define-public (update-category-budget (category-id uint) (new-budget-limit uint))
+  (let
+    (
+      (category (unwrap! (map-get? categories { category-id: category-id }) ERR_CATEGORY_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-budget-limit u0) ERR_INVALID_AMOUNT)
+    (asserts! (get is-active category) ERR_CATEGORY_NOT_FOUND)
+    
+    (map-set categories
+      { category-id: category-id }
+      (merge category { budget-limit: new-budget-limit })
+    )
+    (ok true)
+  )
+)
+
+(define-public (toggle-category-status (category-id uint))
+  (let
+    (
+      (category (unwrap! (map-get? categories { category-id: category-id }) ERR_CATEGORY_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    
+    (map-set categories
+      { category-id: category-id }
+      (merge category { is-active: (not (get is-active category)) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (submit-proposal (title (string-ascii 64)) (description (string-ascii 256)) (amount uint) (category-id uint))
   (let
     (
       (proposal-id (+ (var-get proposal-counter) u1))
       (current-allocated (var-get allocated-budget))
       (total (var-get total-budget))
+      (category (unwrap! (map-get? categories { category-id: category-id }) ERR_CATEGORY_NOT_FOUND))
+      (category-allocated (get allocated category))
+      (category-limit (get budget-limit category))
     )
     (asserts! (is-registered-voter tx-sender) ERR_NOT_AUTHORIZED)
     (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (get is-active category) ERR_CATEGORY_NOT_FOUND)
     (asserts! (<= (+ current-allocated amount) total) ERR_INSUFFICIENT_BUDGET)
+    (asserts! (<= (+ category-allocated amount) category-limit) ERR_CATEGORY_BUDGET_EXCEEDED)
     
     (map-set proposals
       { proposal-id: proposal-id }
@@ -85,7 +176,8 @@
         votes-for: u0,
         votes-against: u0,
         created-at: stacks-block-height,
-        status: "active"
+        status: "active",
+        category-id: category-id
       }
     )
     (var-set proposal-counter proposal-id)
@@ -135,6 +227,8 @@
       (votes-for (get votes-for proposal))
       (votes-against (get votes-against proposal))
       (proposal-amount (get amount proposal))
+      (proposal-category-id (get category-id proposal))
+      (category (unwrap! (map-get? categories { category-id: proposal-category-id }) ERR_CATEGORY_NOT_FOUND))
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status proposal) "active") ERR_VOTING_CLOSED)
@@ -145,6 +239,10 @@
         (map-set proposals
           { proposal-id: proposal-id }
           (merge proposal { status: "approved" })
+        )
+        (map-set categories
+          { category-id: proposal-category-id }
+          (merge category { allocated: (+ (get allocated category) proposal-amount) })
         )
         (var-set allocated-budget (+ (var-get allocated-budget) proposal-amount))
         (ok "approved")
@@ -307,5 +405,42 @@
   (if (is-registered-voter voter)
     u1
     u0
+  )
+)
+
+(define-read-only (get-category (category-id uint))
+  (map-get? categories { category-id: category-id })
+)
+
+(define-read-only (get-category-by-name (name (string-ascii 32)))
+  (match (map-get? category-name-lookup { name: name })
+    lookup (map-get? categories { category-id: (get category-id lookup) })
+    none
+  )
+)
+
+(define-read-only (get-category-budget-info (category-id uint))
+  (match (map-get? categories { category-id: category-id })
+    category (some {
+      budget-limit: (get budget-limit category),
+      allocated: (get allocated category),
+      available: (- (get budget-limit category) (get allocated category))
+    })
+    none
+  )
+)
+
+(define-read-only (get-category-count)
+  (var-get category-counter)
+)
+
+(define-read-only (get-proposals-by-category (category-id uint))
+  category-id
+)
+
+(define-read-only (is-category-active (category-id uint))
+  (match (map-get? categories { category-id: category-id })
+    category (get is-active category)
+    false
   )
 )
