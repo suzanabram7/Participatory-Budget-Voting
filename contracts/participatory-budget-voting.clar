@@ -13,12 +13,15 @@
 (define-constant ERR_CATEGORY_NOT_FOUND (err u111))
 (define-constant ERR_CATEGORY_BUDGET_EXCEEDED (err u112))
 (define-constant ERR_CATEGORY_EXISTS (err u113))
+(define-constant ERR_QUORUM_NOT_REACHED (err u114))
 
 (define-data-var total-budget uint u0)
 (define-data-var allocated-budget uint u0)
 (define-data-var voting-period uint u1008)
 (define-data-var proposal-counter uint u0)
 (define-data-var category-counter uint u0)
+(define-data-var quorum-percentage uint u20)
+(define-data-var total-registered-voters uint u0)
 
 (define-map proposals
   { proposal-id: uint }
@@ -77,7 +80,14 @@
 )
 
 (define-public (register-voter)
-  (begin
+  (let
+    (
+      (existing-voter (map-get? voter-registry { voter: tx-sender }))
+    )
+    (if (is-none existing-voter)
+      (var-set total-registered-voters (+ (var-get total-registered-voters) u1))
+      true
+    )
     (map-set voter-registry 
       { voter: tx-sender }
       { is-registered: true, registration-block: stacks-block-height }
@@ -226,13 +236,16 @@
       (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
       (votes-for (get votes-for proposal))
       (votes-against (get votes-against proposal))
+      (total-votes (+ votes-for votes-against))
       (proposal-amount (get amount proposal))
       (proposal-category-id (get category-id proposal))
       (category (unwrap! (map-get? categories { category-id: proposal-category-id }) ERR_CATEGORY_NOT_FOUND))
+      (quorum-required (calculate-quorum-threshold))
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status proposal) "active") ERR_VOTING_CLOSED)
     (asserts! (>= stacks-block-height (+ (get created-at proposal) (var-get voting-period))) ERR_VOTING_NOT_ENDED)
+    (asserts! (>= total-votes quorum-required) ERR_QUORUM_NOT_REACHED)
     
     (if (> votes-for votes-against)
       (begin
@@ -280,6 +293,15 @@
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
     (asserts! (> new-period u0) ERR_INVALID_AMOUNT)
     (var-set voting-period new-period)
+    (ok true)
+  )
+)
+
+(define-public (set-quorum-percentage (new-percentage uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (<= new-percentage u100) ERR_INVALID_AMOUNT)
+    (var-set quorum-percentage new-percentage)
     (ok true)
   )
 )
@@ -443,4 +465,53 @@
     category (get is-active category)
     false
   )
+)
+
+(define-read-only (calculate-quorum-threshold)
+  (let
+    (
+      (total-voters (var-get total-registered-voters))
+      (quorum-pct (var-get quorum-percentage))
+    )
+    (/ (* total-voters quorum-pct) u100)
+  )
+)
+
+(define-read-only (check-quorum-status (proposal-id uint))
+  (match (map-get? proposals { proposal-id: proposal-id })
+    proposal 
+      (let
+        (
+          (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+          (quorum-required (calculate-quorum-threshold))
+        )
+        (some {
+          total-votes: total-votes,
+          quorum-required: quorum-required,
+          quorum-reached: (>= total-votes quorum-required)
+        })
+      )
+    none
+  )
+)
+
+(define-read-only (get-quorum-percentage)
+  (var-get quorum-percentage)
+)
+
+(define-read-only (get-total-registered-voters)
+  (var-get total-registered-voters)
+)
+
+(define-read-only (get-governance-parameters)
+  {
+    total-budget: (var-get total-budget),
+    allocated-budget: (var-get allocated-budget),
+    voting-period: (var-get voting-period),
+    quorum-percentage: (var-get quorum-percentage),
+    total-registered-voters: (var-get total-registered-voters),
+    quorum-threshold: (calculate-quorum-threshold),
+    proposal-count: (var-get proposal-counter),
+    category-count: (var-get category-counter)
+  }
 )
