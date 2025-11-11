@@ -14,6 +14,8 @@
 (define-constant ERR_CATEGORY_BUDGET_EXCEEDED (err u112))
 (define-constant ERR_CATEGORY_EXISTS (err u113))
 (define-constant ERR_QUORUM_NOT_REACHED (err u114))
+(define-constant ERR_NOT_PROPOSER (err u115))
+(define-constant ERR_PROPOSAL_NOT_CANCELLABLE (err u116))
 
 (define-data-var total-budget uint u0)
 (define-data-var allocated-budget uint u0)
@@ -268,6 +270,26 @@
         (ok "rejected")
       )
     )
+  )
+)
+
+(define-public (cancel-proposal (proposal-id uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+      (proposer (get proposer proposal))
+      (votes-for (get votes-for proposal))
+      (votes-against (get votes-against proposal))
+      (total-votes (+ votes-for votes-against))
+    )
+    (asserts! (or (is-eq tx-sender proposer) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_PROPOSER)
+    (asserts! (is-eq (get status proposal) "active") ERR_PROPOSAL_NOT_CANCELLABLE)
+    (asserts! (is-eq total-votes u0) ERR_PROPOSAL_NOT_CANCELLABLE)
+    (map-set proposals
+      { proposal-id: proposal-id }
+      (merge proposal { status: "cancelled" })
+    )
+    (ok true)
   )
 )
 
