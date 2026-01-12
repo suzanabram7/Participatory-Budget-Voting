@@ -537,3 +537,89 @@
     category-count: (var-get category-counter)
   }
 )
+
+(define-constant ERR_MILESTONE_NOT_FOUND (err u117))
+(define-constant ERR_PROPOSAL_NOT_APPROVED (err u118))
+(define-constant ERR_MILESTONE_AMOUNT_EXCEEDED (err u119))
+
+(define-map milestones
+  { proposal-id: uint, milestone-id: uint }
+  {
+    title: (string-ascii 64),
+    description: (string-ascii 256),
+    amount: uint,
+    status: (string-ascii 16),
+    created-at: uint
+  }
+)
+
+(define-map milestone-counters
+  { proposal-id: uint }
+  { count: uint }
+)
+
+(define-map milestone-allocations
+  { proposal-id: uint }
+  { allocated: uint }
+)
+
+(define-public (create-milestone (proposal-id uint) (title (string-ascii 64)) (description (string-ascii 256)) (amount uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+      (proposer (get proposer proposal))
+      (status (get status proposal))
+      (proposal-amount (get amount proposal))
+      (counter-entry (map-get? milestone-counters { proposal-id: proposal-id }))
+      (current-count (default-to u0 (get count counter-entry)))
+      (new-id (+ current-count u1))
+      (allocation-entry (map-get? milestone-allocations { proposal-id: proposal-id }))
+      (current-allocated (default-to u0 (get allocated allocation-entry)))
+    )
+    (asserts! (or (is-eq tx-sender proposer) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq status "approved") ERR_PROPOSAL_NOT_APPROVED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (<= (+ current-allocated amount) proposal-amount) ERR_MILESTONE_AMOUNT_EXCEEDED)
+    (map-set milestones
+      { proposal-id: proposal-id, milestone-id: new-id }
+      { title: title, description: description, amount: amount, status: "pending", created-at: stacks-block-height }
+    )
+    (map-set milestone-counters
+      { proposal-id: proposal-id }
+      { count: new-id }
+    )
+    (map-set milestone-allocations
+      { proposal-id: proposal-id }
+      { allocated: (+ current-allocated amount) }
+    )
+    (ok new-id)
+  )
+)
+
+(define-public (update-milestone-status (proposal-id uint) (milestone-id uint) (new-status (string-ascii 16)))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id }) ERR_MILESTONE_NOT_FOUND))
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+      (proposer (get proposer proposal))
+    )
+    (asserts! (or (is-eq tx-sender proposer) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+    (map-set milestones
+      { proposal-id: proposal-id, milestone-id: milestone-id }
+      (merge milestone { status: new-status })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-milestone (proposal-id uint) (milestone-id uint))
+  (map-get? milestones { proposal-id: proposal-id, milestone-id: milestone-id })
+)
+
+(define-read-only (get-milestone-count (proposal-id uint))
+  (default-to u0 (get count (map-get? milestone-counters { proposal-id: proposal-id })))
+)
+
+(define-read-only (get-milestone-allocation (proposal-id uint))
+  (default-to u0 (get allocated (map-get? milestone-allocations { proposal-id: proposal-id })))
+)
